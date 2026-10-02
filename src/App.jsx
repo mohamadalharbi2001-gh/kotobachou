@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { ChevronLeft, Trash2, LogOut } from "lucide-react";
 import { signUp, signIn, refreshSession, signOutRemote, getNotebook, saveNotebook } from "./supabaseClient";
+import HanziWriter from "hanzi-writer";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
@@ -385,7 +386,9 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
   }
 
   const totalItems = notes.vocab.length + notes.grammar.length + notes.examples.length;
-  const dueCount = Object.keys(notes.progress).filter(function (k) { return notes.progress[k].due <= Date.now(); }).length;
+  const dueKeys = Object.keys(notes.progress).filter(function (k) { return notes.progress[k].due <= Date.now(); });
+  const writeDue = dueKeys.filter(function (k) { return k.indexOf("w:") === 0; }).length;
+  const dueCount = dueKeys.length - writeDue;
 
   return (
     <div className="kb-app">
@@ -421,6 +424,11 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
                     {dueCount} item{dueCount === 1 ? "" : "s"} due for review — open Quiz to go through {dueCount === 1 ? "it" : "them"}.
                   </p>
                 )}
+                {writeDue > 0 && (
+                  <p style={{ marginTop: 6, color: "var(--shu)" }}>
+                    {writeDue} character{writeDue === 1 ? "" : "s"} due for writing practice — open Write.
+                  </p>
+                )}
                 <div className="kb-nav">
                   <button className="kb-cell" onClick={function () { setView("upload"); }}>
                     <span className="kb-cell-glyph">書</span>
@@ -438,6 +446,10 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
                     <span className="kb-cell-glyph">練</span>
                     <span className="kb-cell-label">Practice</span>
                   </button>
+                  <button className="kb-cell" onClick={function () { setView("write"); }}>
+                    <span className="kb-cell-glyph">筆</span>
+                    <span className="kb-cell-label">Write</span>
+                  </button>
                   <button className="kb-cell" onClick={function () { setView("quiz"); }}>
                     <span className="kb-cell-glyph">験</span>
                     <span className="kb-cell-label">Quiz</span>
@@ -453,6 +465,7 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
         {view === "browse" && <BrowseView notes={notes} onChange={persist} />}
         {view === "export" && <ExportView notes={notes} onClear={function () { return persist(EMPTY_NOTES); }} />}
         {view === "practice" && <PracticeView progress={notes.progress} onAnswer={recordAnswer} />}
+        {view === "write" && <WriteView progress={notes.progress} onAnswer={recordAnswer} />}
         {view === "quiz" && <QuizView notes={notes} onAnswer={recordAnswer} />}
       </div>
     </div>
@@ -1116,6 +1129,215 @@ function PracticeView({ progress, onAnswer }) {
           <button className="kb-btn" onClick={nextQuestion}>Next</button>
         </div>
       )}
+    </div>
+  );
+}
+
+function loadStrokeData(char, onLoad, onError) {
+  fetch("/strokes/" + char.codePointAt(0).toString(16) + ".json")
+    .then(function (res) {
+      if (!res.ok) throw new Error("No stroke data for " + char);
+      return res.json();
+    })
+    .then(onLoad)
+    .catch(onError);
+}
+
+function WriteView({ progress, onAnswer }) {
+  const [setName, setSetName] = useState("hiragana");
+  const [item, setItem] = useState(null);
+  const [mode, setMode] = useState("watch");
+  const [result, setResult] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const boxRef = useRef(null);
+  const writerRef = useRef(null);
+  const size = Math.max(220, Math.min(320, (typeof window !== "undefined" ? window.innerWidth : 360) - 64));
+
+  function pool() {
+    if (setName === "katakana") return KATAKANA;
+    if (setName === "kanji") return KANJI;
+    return HIRAGANA;
+  }
+
+  function pickSmart(avoidChar) {
+    const items = pool().map(function (t) { return { key: "w:" + t[0], tuple: t }; });
+    return pickNext(items, progress, avoidChar && "w:" + avoidChar).tuple;
+  }
+
+  useEffect(function () {
+    setItem(pickSmart(null));
+    // eslint-disable-next-line
+  }, [setName]);
+
+  useEffect(function () {
+    if (!item || !boxRef.current) return undefined;
+    boxRef.current.innerHTML = "";
+    setResult(null);
+    setLoadFailed(false);
+    setMode("watch");
+    const writer = HanziWriter.create(boxRef.current, item[0], {
+      width: size,
+      height: size,
+      padding: 18,
+      charDataLoader: loadStrokeData,
+      onLoadCharDataError: function () { setLoadFailed(true); },
+      showOutline: true,
+      strokeColor: "#24211D",
+      outlineColor: "#C9C0A0",
+      highlightColor: "#B7410E",
+      drawingColor: "#2A3F5C",
+      drawingWidth: 16,
+      strokeAnimationSpeed: 0.8,
+      delayBetweenStrokes: 350
+    });
+    writerRef.current = writer;
+    writer.animateCharacter();
+    return function () {
+      try { writer.cancelQuiz(); } catch (e) { /* nothing to cancel */ }
+      writerRef.current = null;
+    };
+    // eslint-disable-next-line
+  }, [item]);
+
+  function watch() {
+    const w = writerRef.current;
+    if (!w) return;
+    w.cancelQuiz();
+    setResult(null);
+    setMode("watch");
+    w.showOutline();
+    w.showCharacter();
+    w.animateCharacter();
+  }
+
+  function startQuiz(fromMemory) {
+    const w = writerRef.current;
+    if (!w) return;
+    w.cancelQuiz();
+    setResult(null);
+    setMode(fromMemory ? "memory" : "trace");
+    if (fromMemory) w.hideOutline(); else w.showOutline();
+    const key = "w:" + item[0];
+    w.quiz({
+      leniency: 1.3,
+      showHintAfterMisses: 3,
+      highlightOnComplete: true,
+      onComplete: function (summary) {
+        w.getCharacterData().then(function (data) {
+          const allowed = Math.max(1, Math.floor(data.strokes.length / 6));
+          const good = summary.totalMistakes <= allowed;
+          if (fromMemory) onAnswer(key, good);
+          setResult({ mistakes: summary.totalMistakes, good: good, counted: fromMemory });
+          setMode("done");
+        });
+      }
+    });
+  }
+
+  function nextOne() {
+    setItem(pickSmart(item && item[0]));
+  }
+
+  if (!item) return null;
+
+  const known = function (c) {
+    const r = progress["w:" + c];
+    return r && r.box >= 3;
+  };
+  const due = function (c) {
+    const r = progress["w:" + c];
+    return r && r.due <= Date.now();
+  };
+  const memory = mode === "memory";
+  const isKanji = setName === "kanji";
+
+  return (
+    <div>
+      <div className="kb-wordmark" style={{ fontSize: 26 }}>Write</div>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+        <button className={"kb-btn" + (setName === "hiragana" ? "" : " secondary")} onClick={function () { setSetName("hiragana"); }}>Hiragana</button>
+        <button className={"kb-btn" + (setName === "katakana" ? "" : " secondary")} onClick={function () { setSetName("katakana"); }}>Katakana</button>
+        <button className={"kb-btn" + (setName === "kanji" ? "" : " secondary")} onClick={function () { setSetName("kanji"); }}>Kanji</button>
+      </div>
+
+      <div style={{ textAlign: "center", marginTop: 18 }}>
+        <div style={{ fontSize: 22 }}>
+          {item[1]}
+          {isKanji && <span style={{ fontSize: 14, color: "var(--ink-soft)" }}> — {item[2]}</span>}
+        </div>
+        <div
+          className="kb-card"
+          style={{ display: "inline-block", marginTop: 10, padding: 8, touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}
+        >
+          <div
+            ref={boxRef}
+            style={{
+              width: size,
+              height: size,
+              touchAction: "none",
+              backgroundImage:
+                "linear-gradient(to right, transparent calc(50% - 0.5px), var(--paper-line) calc(50% - 0.5px), var(--paper-line) calc(50% + 0.5px), transparent calc(50% + 0.5px))," +
+                "linear-gradient(to bottom, transparent calc(50% - 0.5px), var(--paper-line) calc(50% - 0.5px), var(--paper-line) calc(50% + 0.5px), transparent calc(50% + 0.5px))"
+            }}
+          />
+        </div>
+        {loadFailed && <p style={{ color: "var(--shu)", fontSize: 13 }}>Could not load the stroke data for this character.</p>}
+      </div>
+
+      <p style={{ textAlign: "center", fontSize: 13, color: "var(--ink-soft)", marginTop: 10, minHeight: 20 }}>
+        {mode === "watch" && "Watch the stroke order, then try tracing it."}
+        {mode === "trace" && "Trace over the faint outline with your finger, pen or mouse. Stroke order matters."}
+        {memory && "Write it from memory. After 3 wrong tries on a stroke it shows a hint."}
+        {mode === "done" && result && (result.good
+          ? "Nicely done" + (result.mistakes === 0 ? " — no mistakes!" : " — " + result.mistakes + " slip" + (result.mistakes === 1 ? "" : "s") + ".")
+          : result.mistakes + " mistakes — watch it once more and try again.")}
+        {mode === "done" && result && !result.counted && " (Tracing isn't counted in your review. Try from memory.)"}
+      </p>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", justifyContent: "center" }}>
+        <button className="kb-btn secondary" onClick={watch}>Watch strokes</button>
+        <button className="kb-btn secondary" onClick={function () { startQuiz(false); }}>Trace it</button>
+        <button className="kb-btn" onClick={function () { startQuiz(true); }}>Write from memory</button>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center" }}>
+        <button className="kb-btn secondary" onClick={nextOne}>Next character</button>
+      </div>
+
+      <details style={{ marginTop: 22 }}>
+        <summary style={{ cursor: "pointer", fontSize: 13, color: "var(--ink-soft)" }}>Choose a character yourself</summary>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 10 }}>
+          {pool().map(function (t) {
+            const selected = t[0] === item[0];
+            return (
+              <button
+                key={t[0]}
+                onClick={function () { setItem(t); }}
+                style={{
+                  width: 38,
+                  height: 38,
+                  fontFamily: "'Zen Maru Gothic', sans-serif",
+                  fontSize: 20,
+                  cursor: "pointer",
+                  color: "var(--ink)",
+                  border: selected ? "2px solid var(--indigo)" : due(t[0]) ? "1.5px solid var(--shu)" : "1px solid var(--paper-line)",
+                  background: known(t[0]) ? "rgba(42,63,92,0.18)" : "transparent",
+                  padding: 0
+                }}
+              >
+                {t[0]}
+              </button>
+            );
+          })}
+        </div>
+        <p style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 8 }}>Shaded = you know it well. Red border = due for review.</p>
+      </details>
+
+      <p style={{ fontSize: 11, color: "var(--ink-soft)", marginTop: 24 }}>
+        Stroke data from <a href="https://github.com/parsimonhi/animCJK" target="_blank" rel="noreferrer">AnimCJK</a> and{" "}
+        <a href="https://github.com/chanind/hanzi-writer-data-jp" target="_blank" rel="noreferrer">Hanzi Writer data</a>
+        {" "}(Arphic Public License / LGPL; licence texts in <a href="/licenses/COPYING.txt">/licenses</a>).
+      </p>
     </div>
   );
 }
