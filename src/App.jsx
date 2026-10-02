@@ -1219,12 +1219,16 @@ function WriteView({ progress, onAnswer }) {
     if (fromMemory) w.hideOutline(); else w.showOutline();
     const key = "w:" + item[0];
     w.quiz({
-      leniency: 1.3,
-      showHintAfterMisses: 3,
+      // Mouse and finger input is far less precise than a pen, so be generous:
+      // wide tolerance, accept backwards strokes, and never leave a stroke stuck.
+      leniency: 2.6,
+      acceptBackwardsStrokes: true,
+      markStrokeCorrectAfterMisses: 3,
+      showHintAfterMisses: 2,
       highlightOnComplete: true,
       onComplete: function (summary) {
         w.getCharacterData().then(function (data) {
-          const allowed = Math.max(1, Math.floor(data.strokes.length / 6));
+          const allowed = Math.max(2, Math.floor(data.strokes.length / 4));
           const good = summary.totalMistakes <= allowed;
           if (fromMemory) onAnswer(key, good);
           setResult({ mistakes: summary.totalMistakes, good: good, counted: fromMemory });
@@ -1288,7 +1292,7 @@ function WriteView({ progress, onAnswer }) {
       <p style={{ textAlign: "center", fontSize: 13, color: "var(--ink-soft)", marginTop: 10, minHeight: 20 }}>
         {mode === "watch" && "Watch the stroke order, then try tracing it."}
         {mode === "trace" && "Trace over the faint outline with your finger, pen or mouse. Stroke order matters."}
-        {memory && "Write it from memory. After 3 wrong tries on a stroke it shows a hint."}
+        {memory && "Write it from memory. After 2 misses on a stroke it shows a hint, and after 3 it moves on."}
         {mode === "done" && result && (result.good
           ? "Nicely done" + (result.mistakes === 0 ? " — no mistakes!" : " — " + result.mistakes + " slip" + (result.mistakes === 1 ? "" : "s") + ".")
           : result.mistakes + " mistakes — watch it once more and try again.")}
