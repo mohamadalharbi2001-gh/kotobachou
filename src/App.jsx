@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { ChevronLeft, Trash2, LogOut } from "lucide-react";
+import { ChevronLeft, Trash2, LogOut, Volume2 } from "lucide-react";
 import { signUp, signIn, refreshSession, signOutRemote, getNotebook, saveNotebook } from "./supabaseClient";
 import HanziWriter from "hanzi-writer";
 import * as pdfjsLib from "pdfjs-dist";
@@ -149,6 +149,66 @@ function progressStats(items, progress) {
     else stats.known += 1;
   });
   return stats;
+}
+
+// Audio uses the speech engine built into the phone/computer, so it is free and works offline.
+function japaneseVoices() {
+  if (typeof window === "undefined" || !window.speechSynthesis) return [];
+  return window.speechSynthesis.getVoices().filter(function (v) { return /^ja/i.test(v.lang.replace("_", "-")); });
+}
+
+function voiceRank(v) {
+  return /natural|online|google|kyoko|nanami|otoya|haruka|premium|enhanced/i.test(v.name) ? 0 : 1;
+}
+
+// Returns an error message if the sentence can't be spoken, otherwise null.
+function speak(text) {
+  if (typeof window === "undefined" || !window.speechSynthesis || typeof SpeechSynthesisUtterance === "undefined") {
+    return "This browser can't play audio.";
+  }
+  const synth = window.speechSynthesis;
+  const all = synth.getVoices();
+  const ja = japaneseVoices().sort(function (a, b) { return voiceRank(a) - voiceRank(b); });
+  if (all.length > 0 && ja.length === 0) {
+    return "No Japanese voice is installed on this device. Add one in your system's language/speech settings.";
+  }
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ja-JP";
+  if (ja.length > 0) u.voice = ja[0];
+  u.rate = 0.85;
+  synth.speak(u);
+  return null;
+}
+
+// Prefer the kana reading when there is one, so kanji aren't misread.
+function speakable(japanese, reading) {
+  if (reading && /[぀-ヿ]/.test(reading) && !/[a-z]/i.test(reading)) return reading;
+  return japanese;
+}
+
+function SpeakButton({ text, size }) {
+  const [problem, setProblem] = useState(null);
+  if (!text) return null;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <button
+        type="button"
+        aria-label="Play audio"
+        title="Play audio"
+        className="kb-btn secondary"
+        style={{ padding: "3px 7px", lineHeight: 0 }}
+        onClick={function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          setProblem(speak(text));
+        }}
+      >
+        <Volume2 size={size || 14} />
+      </button>
+      {problem && <span style={{ fontSize: 11, color: "var(--shu)" }}>{problem}</span>}
+    </span>
+  );
 }
 
 async function callClaude(system, content, maxTokens) {
@@ -811,7 +871,8 @@ function BrowseView({ notes, onChange }) {
                 <div key={v.id} className="kb-item-row" style={{ flexDirection: "column" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
                     <span>
-                      <strong>{v.japanese}</strong>{v.reading ? " (" + v.reading + ")" : ""} — {v.meaning}
+                      <strong>{v.japanese}</strong>{v.reading ? " (" + v.reading + ")" : ""} — {v.meaning}{" "}
+                      <SpeakButton text={speakable(v.japanese, v.reading)} />
                     </span>
                     <button className="kb-btn danger" style={{ fontSize: 11, padding: "3px 8px" }} onClick={function () { removeItem("vocab", v.id); }}>
                       <Trash2 size={12} />
@@ -834,7 +895,7 @@ function BrowseView({ notes, onChange }) {
                 <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
                   <span>
                     <strong>{g.point}</strong> — {g.explanation}
-                    {g.example_ja && <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>{g.example_ja} — {g.example_en}</div>}
+                    {g.example_ja && <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>{g.example_ja} — {g.example_en} <SpeakButton text={g.example_ja} size={12} /></div>}
                   </span>
                   <button className="kb-btn danger" style={{ fontSize: 11, padding: "3px 8px" }} onClick={function () { removeItem("grammar", g.id); }}>
                     <Trash2 size={12} />
@@ -854,7 +915,7 @@ function BrowseView({ notes, onChange }) {
             return (
               <div key={e.id} className="kb-item-row" style={{ flexDirection: "column" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                  <span>{e.japanese} — {e.translation}</span>
+                  <span>{e.japanese} — {e.translation} <SpeakButton text={e.japanese} /></span>
                   <button className="kb-btn danger" style={{ fontSize: 11, padding: "3px 8px" }} onClick={function () { removeItem("examples", e.id); }}>
                     <Trash2 size={12} />
                   </button>
@@ -1090,6 +1151,7 @@ function PracticeView({ progress, onAnswer }) {
 
       <div className="kb-card" style={{ marginTop: 12, textAlign: "center", padding: 32 }}>
         <div style={{ fontFamily: "'Zen Maru Gothic', sans-serif", fontSize: 64 }}>{question.kana}</div>
+        {!question.meaning && <div style={{ marginTop: 8 }}><SpeakButton text={question.kana} size={18} /></div>}
       </div>
 
       {mode === "mc" && (
@@ -1269,6 +1331,7 @@ function WriteView({ progress, onAnswer }) {
         <div style={{ fontSize: 22 }}>
           {item[1]}
           {isKanji && <span style={{ fontSize: 14, color: "var(--ink-soft)" }}> — {item[2]}</span>}
+          {!isKanji && <span style={{ marginLeft: 10 }}><SpeakButton text={item[0]} size={16} /></span>}
         </div>
         <div
           className="kb-card"
@@ -1350,6 +1413,7 @@ function QuizView({ notes, onAnswer }) {
   const [mode, setMode] = useState("mc");
   const [includeKanji, setIncludeKanji] = useState(true);
   const [smart, setSmart] = useState(true);
+  const [listenOnly, setListenOnly] = useState(false);
   const [question, setQuestion] = useState(null);
   const [options, setOptions] = useState([]);
   const [typedAnswer, setTypedAnswer] = useState("");
@@ -1357,7 +1421,8 @@ function QuizView({ notes, onAnswer }) {
   const [score, setScore] = useState({ correct: 0, total: 0 });
 
   function pool() {
-    const fromVocab = notes.vocab.map(function (v) { return { key: v.id || "v:" + v.japanese, prompt: v.japanese, sub: v.reading, answer: v.meaning }; });
+    const fromVocab = notes.vocab.map(function (v) { return { key: v.id || "v:" + v.japanese, prompt: v.japanese, sub: v.reading, answer: v.meaning, say: speakable(v.japanese, v.reading) }; });
+    if (listenOnly) return fromVocab;
     const fromGrammar = notes.grammar.map(function (g) { return { key: g.id || "g:" + g.point, prompt: g.point, sub: "", answer: g.explanation }; });
     const fromKanji = includeKanji ? KANJI.map(function (k) { return { key: "kanji:" + k[0], prompt: k[0], sub: k[1], answer: k[2] }; }) : [];
     return fromVocab.concat(fromGrammar).concat(fromKanji);
@@ -1377,12 +1442,13 @@ function QuizView({ notes, onAnswer }) {
       const distractors = pickN(p, 3, pick).map(function (d) { return d.answer; });
       setOptions(shuffle(distractors.concat([pick.answer])));
     }
+    if (listenOnly && pick.say) speak(pick.say);
   }
 
   useEffect(function () {
     nextQuestion();
     // eslint-disable-next-line
-  }, [mode, includeKanji, smart, notes.vocab.length, notes.grammar.length]);
+  }, [mode, includeKanji, smart, listenOnly, notes.vocab.length, notes.grammar.length]);
 
   function answerMc(choice) {
     if (feedback) return;
@@ -1426,9 +1492,15 @@ function QuizView({ notes, onAnswer }) {
         <p style={{ marginTop: 16, color: "var(--ink-soft)" }}>
           You need at least a few saved words, grammar points, or kanji questions before there's enough to quiz you on.
         </p>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 13, cursor: "pointer" }}>
-          <input type="checkbox" checked={includeKanji} onChange={function () { setIncludeKanji(!includeKanji); }} />
-          Include kanji questions
+        {!listenOnly && (
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={includeKanji} onChange={function () { setIncludeKanji(!includeKanji); }} />
+            Include kanji questions
+          </label>
+        )}
+        <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 13, cursor: "pointer" }}>
+          <input type="checkbox" checked={listenOnly} onChange={function () { setListenOnly(!listenOnly); }} />
+          Listening only (words are spoken, not shown — your saved words only)
         </label>
       </div>
     );
@@ -1444,13 +1516,19 @@ function QuizView({ notes, onAnswer }) {
         <button className={"kb-btn" + (mode === "mc" ? "" : " secondary")} onClick={function () { setMode("mc"); }}>Multiple choice</button>
         <button className={"kb-btn" + (mode === "typed" ? "" : " secondary")} onClick={function () { setMode("typed"); }}>Type the answer</button>
       </div>
-      <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 13, cursor: "pointer" }}>
-        <input type="checkbox" checked={includeKanji} onChange={function () { setIncludeKanji(!includeKanji); }} />
-        Include kanji questions
-      </label>
+      {!listenOnly && (
+        <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 13, cursor: "pointer" }}>
+          <input type="checkbox" checked={includeKanji} onChange={function () { setIncludeKanji(!includeKanji); }} />
+          Include kanji questions
+        </label>
+      )}
       <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 13, cursor: "pointer" }}>
         <input type="checkbox" checked={smart} onChange={function () { setSmart(!smart); }} />
         Smart review (brings back what you missed, checks old ones now and then)
+      </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 13, cursor: "pointer" }}>
+        <input type="checkbox" checked={listenOnly} onChange={function () { setListenOnly(!listenOnly); }} />
+        Listening only (words are spoken, not shown — your saved words only)
       </label>
 
       <p style={{ marginTop: 16, fontSize: 13, color: "var(--ink-soft)" }}>
@@ -1458,9 +1536,16 @@ function QuizView({ notes, onAnswer }) {
       </p>
 
       <div className="kb-card" style={{ marginTop: 12, textAlign: "center", padding: 32 }}>
-        <div style={{ fontFamily: "'Zen Maru Gothic', sans-serif", fontSize: 34 }}>{question.prompt}</div>
-        {question.sub && <div style={{ fontSize: 14, color: "var(--ink-soft)", marginTop: 6 }}>{question.sub}</div>}
-        <div style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 6 }}>What does this mean?</div>
+        {listenOnly && !feedback ? (
+          <div style={{ fontSize: 14, color: "var(--ink-soft)" }}>Listen — then choose what it means.</div>
+        ) : (
+          <>
+            <div style={{ fontFamily: "'Zen Maru Gothic', sans-serif", fontSize: 34 }}>{question.prompt}</div>
+            {question.sub && <div style={{ fontSize: 14, color: "var(--ink-soft)", marginTop: 6 }}>{question.sub}</div>}
+          </>
+        )}
+        {question.say && <div style={{ marginTop: 10 }}><SpeakButton text={question.say} size={listenOnly ? 22 : 16} /></div>}
+        {!listenOnly && <div style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 6 }}>What does this mean?</div>}
       </div>
 
       {mode === "mc" && (
