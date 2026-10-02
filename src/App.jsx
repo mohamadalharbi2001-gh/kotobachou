@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { ChevronLeft, Trash2, LogOut, Volume2 } from "lucide-react";
+import { matchesJapanese, buildCloze, CLOZE_PARTICLES } from "./quizHelpers";
 import { signUp, signIn, refreshSession, signOutRemote, getNotebook, saveNotebook } from "./supabaseClient";
 import HanziWriter from "hanzi-writer";
 import * as pdfjsLib from "pdfjs-dist";
@@ -1414,18 +1415,35 @@ function QuizView({ notes, onAnswer }) {
   const [includeKanji, setIncludeKanji] = useState(true);
   const [smart, setSmart] = useState(true);
   const [listenOnly, setListenOnly] = useState(false);
+  const [qtype, setQtype] = useState("jp2en");
   const [question, setQuestion] = useState(null);
   const [options, setOptions] = useState([]);
   const [typedAnswer, setTypedAnswer] = useState("");
   const [feedback, setFeedback] = useState(null);
   const [score, setScore] = useState({ correct: 0, total: 0 });
 
+  const clozeItems = useMemo(function () { return buildCloze(notes); }, [notes.vocab, notes.grammar, notes.examples]);
+
+  function vocabLabel(v) {
+    return v.reading && v.reading !== v.japanese ? v.japanese + "（" + v.reading + "）" : v.japanese;
+  }
+
   function pool() {
     const fromVocab = notes.vocab.map(function (v) { return { key: v.id || "v:" + v.japanese, prompt: v.japanese, sub: v.reading, answer: v.meaning, say: speakable(v.japanese, v.reading) }; });
     if (listenOnly) return fromVocab;
-    const fromGrammar = notes.grammar.map(function (g) { return { key: g.id || "g:" + g.point, prompt: g.point, sub: "", answer: g.explanation }; });
-    const fromKanji = includeKanji ? KANJI.map(function (k) { return { key: "kanji:" + k[0], prompt: k[0], sub: k[1], answer: k[2] }; }) : [];
-    return fromVocab.concat(fromGrammar).concat(fromKanji);
+    if (qtype === "en2jp") {
+      const jpVocab = notes.vocab.map(function (v) {
+        return { key: (v.id || "v:" + v.japanese) + "|en", group: "v", prompt: v.meaning, sub: "", answer: vocabLabel(v), accept: [v.japanese, v.reading], say: speakable(v.japanese, v.reading) };
+      });
+      const jpKanji = includeKanji ? KANJI.map(function (k) { return { key: "kanji:" + k[0] + "|en", group: "k", prompt: k[2], sub: "", answer: k[0], accept: [k[0]] }; }) : [];
+      return jpVocab.concat(jpKanji);
+    }
+    if (qtype === "cloze") {
+      return notes.vocab.length >= 4 ? clozeItems : clozeItems.filter(function (c) { return c.kind === "particle"; });
+    }
+    const fromGrammar = notes.grammar.map(function (g) { return { key: g.id || "g:" + g.point, group: "g", prompt: g.point, sub: "", answer: g.explanation }; });
+    const fromKanji = includeKanji ? KANJI.map(function (k) { return { key: "kanji:" + k[0], group: "k", prompt: k[0], sub: k[1], answer: k[2] }; }) : [];
+    return fromVocab.map(function (v) { return Object.assign({ group: "v" }, v); }).concat(fromGrammar).concat(fromKanji);
   }
 
   function nextQuestion() {
@@ -1439,8 +1457,24 @@ function QuizView({ notes, onAnswer }) {
     setFeedback(null);
     setTypedAnswer("");
     if (mode === "mc") {
-      const distractors = pickN(p, 3, pick).map(function (d) { return d.answer; });
-      setOptions(shuffle(distractors.concat([pick.answer])));
+      let wrong;
+      if (qtype === "cloze") {
+        const source = pick.kind === "particle"
+          ? CLOZE_PARTICLES
+          : notes.vocab.map(function (v) { return v.japanese; }).filter(function (j, i, arr) { return j && arr.indexOf(j) === i; });
+        wrong = pickN(source.filter(function (x) { return x !== pick.answer; }), 3);
+      } else {
+        const seenAnswers = {};
+        seenAnswers[pick.answer] = true;
+        // draw wrong options from the same kind of item, so the format doesn't give the answer away
+        const sameKind = p.filter(function (d) { return d.group === pick.group; });
+        wrong = shuffle(sameKind.length >= 4 ? sameKind : p).map(function (d) { return d.answer; }).filter(function (a) {
+          if (seenAnswers[a]) return false;
+          seenAnswers[a] = true;
+          return true;
+        }).slice(0, 3);
+      }
+      setOptions(shuffle(wrong.concat([pick.answer])));
     }
     if (listenOnly && pick.say) speak(pick.say);
   }
@@ -1448,7 +1482,7 @@ function QuizView({ notes, onAnswer }) {
   useEffect(function () {
     nextQuestion();
     // eslint-disable-next-line
-  }, [mode, includeKanji, smart, listenOnly, notes.vocab.length, notes.grammar.length]);
+  }, [mode, includeKanji, smart, listenOnly, qtype, notes.vocab.length, notes.grammar.length, notes.examples.length]);
 
   function answerMc(choice) {
     if (feedback) return;
@@ -1460,7 +1494,7 @@ function QuizView({ notes, onAnswer }) {
 
   function answerTyped() {
     if (feedback) return;
-    const correct = normalize(typedAnswer) === normalize(question.answer);
+    const correct = question.accept ? matchesJapanese(typedAnswer, question.accept) : normalize(typedAnswer) === normalize(question.answer);
     setFeedback(correct ? "correct" : "unsure");
     if (correct) {
       setScore(function (s) { return { correct: s.correct + 1, total: s.total + 1 }; });
@@ -1485,14 +1519,27 @@ function QuizView({ notes, onAnswer }) {
     })
     .slice(0, 10);
 
-  if (poolSize < 4) {
+  const qtypePicker = !listenOnly && (
+    <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+      <button className={"kb-btn" + (qtype === "jp2en" ? "" : " secondary")} onClick={function () { setQtype("jp2en"); }}>Japanese → English</button>
+      <button className={"kb-btn" + (qtype === "en2jp" ? "" : " secondary")} onClick={function () { setQtype("en2jp"); }}>English → Japanese</button>
+      <button className={"kb-btn" + (qtype === "cloze" ? "" : " secondary")} onClick={function () { setQtype("cloze"); }}>Fill the blank</button>
+    </div>
+  );
+  const minPool = qtype === "cloze" && !listenOnly ? 3 : 4;
+  const showKanjiToggle = !listenOnly && qtype !== "cloze";
+
+  if (poolSize < minPool) {
     return (
       <div>
         <div className="kb-wordmark" style={{ fontSize: 26 }}>Quiz</div>
+        {qtypePicker}
         <p style={{ marginTop: 16, color: "var(--ink-soft)" }}>
-          You need at least a few saved words, grammar points, or kanji questions before there's enough to quiz you on.
+          {qtype === "cloze" && !listenOnly
+            ? "Fill-the-blank needs example sentences that contain words from your saved vocabulary (and at least 4 saved words). Add more notes, or try another question type."
+            : "You need at least a few saved words, grammar points, or kanji questions before there's enough to quiz you on."}
         </p>
-        {!listenOnly && (
+        {showKanjiToggle && (
           <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 13, cursor: "pointer" }}>
             <input type="checkbox" checked={includeKanji} onChange={function () { setIncludeKanji(!includeKanji); }} />
             Include kanji questions
@@ -1516,7 +1563,8 @@ function QuizView({ notes, onAnswer }) {
         <button className={"kb-btn" + (mode === "mc" ? "" : " secondary")} onClick={function () { setMode("mc"); }}>Multiple choice</button>
         <button className={"kb-btn" + (mode === "typed" ? "" : " secondary")} onClick={function () { setMode("typed"); }}>Type the answer</button>
       </div>
-      {!listenOnly && (
+      {qtypePicker}
+      {showKanjiToggle && (
         <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 13, cursor: "pointer" }}>
           <input type="checkbox" checked={includeKanji} onChange={function () { setIncludeKanji(!includeKanji); }} />
           Include kanji questions
@@ -1540,12 +1588,18 @@ function QuizView({ notes, onAnswer }) {
           <div style={{ fontSize: 14, color: "var(--ink-soft)" }}>Listen — then choose what it means.</div>
         ) : (
           <>
-            <div style={{ fontFamily: "'Zen Maru Gothic', sans-serif", fontSize: 34 }}>{question.prompt}</div>
+            <div style={{ fontFamily: "'Zen Maru Gothic', sans-serif", fontSize: qtype === "jp2en" || listenOnly ? 34 : 26 }}>{question.prompt}</div>
             {question.sub && <div style={{ fontSize: 14, color: "var(--ink-soft)", marginTop: 6 }}>{question.sub}</div>}
           </>
         )}
-        {question.say && <div style={{ marginTop: 10 }}><SpeakButton text={question.say} size={listenOnly ? 22 : 16} /></div>}
-        {!listenOnly && <div style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 6 }}>What does this mean?</div>}
+        {question.say && (listenOnly || qtype === "jp2en" || feedback) && (
+          <div style={{ marginTop: 10 }}><SpeakButton text={question.say} size={listenOnly ? 22 : 16} /></div>
+        )}
+        {!listenOnly && (
+          <div style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 6 }}>
+            {qtype === "en2jp" ? "How do you say this in Japanese?" : qtype === "cloze" ? "Which word fits the blank?" : "What does this mean?"}
+          </div>
+        )}
       </div>
 
       {mode === "mc" && (
@@ -1569,7 +1623,7 @@ function QuizView({ notes, onAnswer }) {
             value={typedAnswer}
             onChange={function (e) { setTypedAnswer(e.target.value); }}
             onKeyDown={function (e) { if (e.key === "Enter") answerTyped(); }}
-            placeholder="type the meaning"
+            placeholder={qtype === "jp2en" || listenOnly ? "type the meaning" : "type it in Japanese, or romaji (e.g. gakkou)"}
             disabled={!!feedback}
           />
           {!feedback && <button className="kb-btn" style={{ marginTop: 10 }} onClick={answerTyped}>Check</button>}
@@ -1579,6 +1633,7 @@ function QuizView({ notes, onAnswer }) {
       {feedback === "correct" && (
         <div style={{ marginTop: 16 }}>
           <p style={{ color: "var(--indigo)", fontWeight: "bold" }}>Correct!</p>
+          {qtype === "cloze" && !listenOnly && <p style={{ fontSize: 14, marginTop: 4 }}>{question.say}</p>}
           <button className="kb-btn" onClick={nextQuestion}>Next</button>
         </div>
       )}
@@ -1586,6 +1641,7 @@ function QuizView({ notes, onAnswer }) {
       {feedback === "incorrect" && (
         <div style={{ marginTop: 16 }}>
           <p style={{ color: "var(--shu)", fontWeight: "bold" }}>Not quite — it's "{question.answer}".</p>
+          {qtype === "cloze" && !listenOnly && <p style={{ fontSize: 14, marginTop: 4 }}>{question.say}</p>}
           <button className="kb-btn" onClick={nextQuestion}>Next</button>
         </div>
       )}
@@ -1593,6 +1649,7 @@ function QuizView({ notes, onAnswer }) {
       {feedback === "unsure" && (
         <div style={{ marginTop: 16 }}>
           <p style={{ color: "var(--ink-soft)" }}>You said "{typedAnswer}". The saved answer is "{question.answer}".</p>
+          {qtype === "cloze" && !listenOnly && <p style={{ fontSize: 14, marginTop: 4 }}>{question.say}</p>}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button className="kb-btn" onClick={function () { selfGrade(true); }}>Close enough, count it right</button>
             <button className="kb-btn danger" onClick={function () { selfGrade(false); }}>No, count it wrong</button>
