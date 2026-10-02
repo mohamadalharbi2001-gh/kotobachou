@@ -9,7 +9,25 @@ import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 
 const SESSION_KEY = "kotobachou-session";
-const EMPTY_NOTES = { vocab: [], grammar: [], examples: [], progress: {} };
+const EMPTY_NOTES = { vocab: [], grammar: [], examples: [], progress: {}, activity: {} };
+
+// "2026-10-02" in the user's local time, used for the daily study log and streaks.
+function dayKey(date) {
+  const d = date || new Date();
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// Consecutive days studied, counting back from today (or from yesterday if today hasn't started yet).
+function studyStreak(activity) {
+  const d = new Date();
+  if (!activity[dayKey(d)]) d.setDate(d.getDate() - 1);
+  let n = 0;
+  while (activity[dayKey(d)]) {
+    n++;
+    d.setDate(d.getDate() - 1);
+  }
+  return n;
+}
 
 const GLOBAL_STYLE = `
   @import url('https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@400;500;700&display=swap');
@@ -352,6 +370,7 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
   const [notes, setNotes] = useState(EMPTY_NOTES);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [quizMistakes, setQuizMistakes] = useState(false);
   const sessionRef = useRef(session);
   sessionRef.current = session;
   const notesRef = useRef(notes);
@@ -364,7 +383,7 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
       try {
         const data = await withFreshToken(function (token) { return getNotebook(token, sessionRef.current.user.id); });
         if (data) {
-          setNotes({ vocab: data.vocab || [], grammar: data.grammar || [], examples: data.examples || [], progress: data.progress || {} });
+          setNotes({ vocab: data.vocab || [], grammar: data.grammar || [], examples: data.examples || [], progress: data.progress || {}, activity: data.activity || {} });
         }
       } catch (err) {
         setLoadError(err.message || "Could not load your notebook.");
@@ -422,7 +441,9 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
   function recordAnswer(key, correct) {
     const prev = notesRef.current;
     const nextProgress = Object.assign({}, prev.progress, { [key]: nextRecord(prev.progress[key], correct) });
-    const next = Object.assign({}, prev, { progress: nextProgress });
+    const today = dayKey();
+    const nextActivity = Object.assign({}, prev.activity, { [today]: ((prev.activity || {})[today] || 0) + 1 });
+    const next = Object.assign({}, prev, { progress: nextProgress, activity: nextActivity });
     notesRef.current = next;
     setNotes(next);
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -450,6 +471,7 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
   const dueKeys = Object.keys(notes.progress).filter(function (k) { return notes.progress[k].due <= Date.now(); });
   const writeDue = dueKeys.filter(function (k) { return k.indexOf("w:") === 0; }).length;
   const dueCount = dueKeys.length - writeDue;
+  const streak = studyStreak(notes.activity || {});
 
   return (
     <div className="kb-app">
@@ -480,6 +502,11 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
                     ? "Your notebook is empty. Upload your first lesson to get started."
                     : notes.vocab.length + " words, " + notes.grammar.length + " grammar points, " + notes.examples.length + " example sentences saved."}
                 </p>
+                {streak > 0 && (
+                  <p style={{ marginTop: 6, color: "var(--ink-soft)" }}>
+                    {streak} day{streak === 1 ? "" : "s"} studying in a row.
+                  </p>
+                )}
                 {dueCount > 0 && (
                   <p style={{ marginTop: 6, color: "var(--shu)" }}>
                     {dueCount} item{dueCount === 1 ? "" : "s"} due for review — open Quiz to go through {dueCount === 1 ? "it" : "them"}.
@@ -511,9 +538,13 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
                     <span className="kb-cell-glyph">筆</span>
                     <span className="kb-cell-label">Write</span>
                   </button>
-                  <button className="kb-cell" onClick={function () { setView("quiz"); }}>
+                  <button className="kb-cell" onClick={function () { setQuizMistakes(false); setView("quiz"); }}>
                     <span className="kb-cell-glyph">験</span>
                     <span className="kb-cell-label">Quiz</span>
+                  </button>
+                  <button className="kb-cell" onClick={function () { setView("progress"); }}>
+                    <span className="kb-cell-glyph">進</span>
+                    <span className="kb-cell-label">Progress</span>
                   </button>
                 </div>
               </>
@@ -527,7 +558,13 @@ function MainApp({ session, onSessionUpdate, onLogout }) {
         {view === "export" && <ExportView notes={notes} onClear={function () { return persist(EMPTY_NOTES); }} />}
         {view === "practice" && <PracticeView progress={notes.progress} onAnswer={recordAnswer} />}
         {view === "write" && <WriteView progress={notes.progress} onAnswer={recordAnswer} />}
-        {view === "quiz" && <QuizView notes={notes} onAnswer={recordAnswer} />}
+        {view === "quiz" && <QuizView notes={notes} onAnswer={recordAnswer} initialMistakesOnly={quizMistakes} />}
+        {view === "progress" && (
+          <ProgressView
+            notes={notes}
+            onReviewMistakes={function () { setQuizMistakes(true); setView("quiz"); }}
+          />
+        )}
       </div>
     </div>
   );
@@ -951,7 +988,8 @@ function ExportView({ notes, onClear }) {
       vocab: notes.vocab,
       grammar: notes.grammar,
       examples: notes.examples,
-      progress: notes.progress
+      progress: notes.progress,
+      activity: notes.activity
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1410,7 +1448,8 @@ function WriteView({ progress, onAnswer }) {
   );
 }
 
-function QuizView({ notes, onAnswer }) {
+function QuizView({ notes, onAnswer, initialMistakesOnly }) {
+  const [mistakesOnly, setMistakesOnly] = useState(!!initialMistakesOnly);
   const [mode, setMode] = useState("mc");
   const [includeKanji, setIncludeKanji] = useState(true);
   const [smart, setSmart] = useState(true);
@@ -1428,7 +1467,18 @@ function QuizView({ notes, onAnswer }) {
     return v.reading && v.reading !== v.japanese ? v.japanese + "（" + v.reading + "）" : v.japanese;
   }
 
+  // Things missed at least once that aren't solidly learned yet.
+  function isMistake(item) {
+    const rec = notes.progress[item.key];
+    return !!rec && rec.wrong > 0 && rec.box <= 3;
+  }
+
   function pool() {
+    const all = basePool();
+    return mistakesOnly ? all.filter(isMistake) : all;
+  }
+
+  function basePool() {
     const fromVocab = notes.vocab.map(function (v) { return { key: v.id || "v:" + v.japanese, prompt: v.japanese, sub: v.reading, answer: v.meaning, say: speakable(v.japanese, v.reading) }; });
     if (listenOnly) return fromVocab;
     if (qtype === "en2jp") {
@@ -1467,8 +1517,9 @@ function QuizView({ notes, onAnswer }) {
         const seenAnswers = {};
         seenAnswers[pick.answer] = true;
         // draw wrong options from the same kind of item, so the format doesn't give the answer away
-        const sameKind = p.filter(function (d) { return d.group === pick.group; });
-        wrong = shuffle(sameKind.length >= 4 ? sameKind : p).map(function (d) { return d.answer; }).filter(function (a) {
+        const everything = basePool();
+        const sameKind = everything.filter(function (d) { return d.group === pick.group; });
+        wrong = shuffle(sameKind.length >= 4 ? sameKind : everything).map(function (d) { return d.answer; }).filter(function (a) {
           if (seenAnswers[a]) return false;
           seenAnswers[a] = true;
           return true;
@@ -1482,7 +1533,7 @@ function QuizView({ notes, onAnswer }) {
   useEffect(function () {
     nextQuestion();
     // eslint-disable-next-line
-  }, [mode, includeKanji, smart, listenOnly, qtype, notes.vocab.length, notes.grammar.length, notes.examples.length]);
+  }, [mode, includeKanji, smart, listenOnly, qtype, mistakesOnly, notes.vocab.length, notes.grammar.length, notes.examples.length]);
 
   function answerMc(choice) {
     if (feedback) return;
@@ -1508,9 +1559,10 @@ function QuizView({ notes, onAnswer }) {
     nextQuestion();
   }
 
-  const poolSize = pool().length;
+  const poolSize = basePool().length;
+  const activeSize = pool().length;
   const stats = progressStats(pool(), notes.progress);
-  const weak = pool()
+  const weak = basePool()
     .filter(function (item) { return notes.progress[item.key] && notes.progress[item.key].wrong > 0; })
     .sort(function (a, b) {
       const ra = notes.progress[a.key];
@@ -1553,6 +1605,26 @@ function QuizView({ notes, onAnswer }) {
     );
   }
 
+  const mistakesToggle = (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 13, cursor: "pointer" }}>
+      <input type="checkbox" checked={mistakesOnly} onChange={function () { setMistakesOnly(!mistakesOnly); }} />
+      Only things I've missed (review my mistakes)
+    </label>
+  );
+
+  if (mistakesOnly && activeSize === 0) {
+    return (
+      <div>
+        <div className="kb-wordmark" style={{ fontSize: 26 }}>Quiz</div>
+        {qtypePicker}
+        <p style={{ marginTop: 16, color: "var(--ink-soft)" }}>
+          Nothing to review here — either you haven't missed anything of this type yet, or you've got it all back on track. Nice.
+        </p>
+        {mistakesToggle}
+      </div>
+    );
+  }
+
   if (!question) return null;
 
   return (
@@ -1574,6 +1646,7 @@ function QuizView({ notes, onAnswer }) {
         <input type="checkbox" checked={smart} onChange={function () { setSmart(!smart); }} />
         Smart review (brings back what you missed, checks old ones now and then)
       </label>
+      {mistakesToggle}
       <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 13, cursor: "pointer" }}>
         <input type="checkbox" checked={listenOnly} onChange={function () { setListenOnly(!listenOnly); }} />
         Listening only (words are spoken, not shown — your saved words only)
@@ -1672,6 +1745,164 @@ function QuizView({ notes, onAnswer }) {
             );
           })}
         </details>
+      )}
+    </div>
+  );
+}
+
+function progressArea(key, notes) {
+  if (key.indexOf("w:") === 0) return "Writing";
+  if (key.indexOf("p:") === 0) return "Kana & kanji reading";
+  if (key.indexOf("kanji:") === 0) return "Kanji meaning";
+  if (key.indexOf("c:") === 0) return "Fill the blank";
+  const base = key.replace(/\|en$/, "");
+  if (notes.grammar.some(function (g) { return g.id === base; }) || base.indexOf("g:") === 0) return "Grammar";
+  return "Words";
+}
+
+// Turn a progress key back into something readable.
+function progressLabel(key, notes) {
+  const reverse = /\|en$/.test(key);
+  const base = key.replace(/\|en$/, "");
+  const arrow = reverse ? " (English → Japanese)" : "";
+  if (base.indexOf("c:") === 0) {
+    const rest = base.slice(2);
+    return rest.slice(0, rest.lastIndexOf(":"));
+  }
+  if (base.indexOf("w:") === 0 || base.indexOf("p:") === 0) {
+    const ch = base.slice(2);
+    const hit = HIRAGANA.concat(KATAKANA).concat(KANJI).find(function (t) { return t[0] === ch; });
+    return ch + (hit ? " — " + (hit[2] ? hit[2] : hit[1]) : "");
+  }
+  if (base.indexOf("kanji:") === 0) {
+    const ch = base.slice(6);
+    const hit = KANJI.find(function (t) { return t[0] === ch; });
+    return ch + (hit ? " — " + hit[2] : "") + arrow;
+  }
+  const v = notes.vocab.find(function (x) { return x.id === base || "v:" + x.japanese === base; });
+  if (v) return v.japanese + (v.reading && v.reading !== v.japanese ? "（" + v.reading + "）" : "") + " — " + v.meaning + arrow;
+  const g = notes.grammar.find(function (x) { return x.id === base || "g:" + x.point === base; });
+  if (g) return g.point;
+  return null; // item was deleted from the notebook
+}
+
+function ProgressView({ notes, onReviewMistakes }) {
+  const progress = notes.progress || {};
+  const activity = notes.activity || {};
+  const keys = Object.keys(progress);
+  const now = Date.now();
+
+  const today = activity[dayKey()] || 0;
+  const streak = studyStreak(activity);
+  const totalAnswers = keys.reduce(function (n, k) { return n + progress[k].right + progress[k].wrong; }, 0);
+
+  // last 14 days
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    days.push({ key: dayKey(d), label: d.getDate(), count: activity[dayKey(d)] || 0 });
+  }
+  const maxDay = Math.max(1, Math.max.apply(null, days.map(function (d) { return d.count; })));
+
+  const areas = {};
+  keys.forEach(function (k) {
+    if (!progressLabel(k, notes)) return; // skip items deleted from the notebook
+    const a = progressArea(k, notes);
+    if (!areas[a]) areas[a] = { seen: 0, known: 0, due: 0, right: 0, wrong: 0 };
+    const r = progress[k];
+    areas[a].seen++;
+    if (r.box >= 4) areas[a].known++;
+    if (r.due <= now) areas[a].due++;
+    areas[a].right += r.right;
+    areas[a].wrong += r.wrong;
+  });
+
+  const trouble = keys
+    .filter(function (k) { return progress[k].wrong > 0 && progress[k].wrong >= progress[k].right && progress[k].box <= 3; })
+    .sort(function (a, b) { return (progress[b].wrong - progress[b].right) - (progress[a].wrong - progress[a].right) || progress[b].wrong - progress[a].wrong; })
+    .map(function (k) { return { key: k, label: progressLabel(k, notes), area: progressArea(k, notes) }; })
+    .filter(function (t) { return t.label; })
+    .slice(0, 15);
+
+  const quizzable = trouble.filter(function (t) { return t.area !== "Writing" && t.area !== "Kana & kanji reading"; }).length;
+
+  const card = { textAlign: "center", padding: 12, flex: 1, minWidth: 90 };
+  const bigNum = { fontFamily: "'Shippori Mincho', serif", fontSize: 28, lineHeight: 1.1 };
+  const small = { fontSize: 11, color: "var(--ink-soft)", marginTop: 2 };
+  const cols = "1.6fr 0.7fr 0.7fr 0.7fr 0.9fr";
+
+  return (
+    <div>
+      <div className="kb-wordmark" style={{ fontSize: 26 }}>Progress</div>
+
+      {keys.length === 0 ? (
+        <p style={{ marginTop: 16, color: "var(--ink-soft)" }}>Nothing to show yet. Answer a few questions in Quiz, Practice or Write and your progress will appear here.</p>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+            <div className="kb-card" style={card}><div style={bigNum}>{streak}</div><div style={small}>day streak</div></div>
+            <div className="kb-card" style={card}><div style={bigNum}>{today}</div><div style={small}>answers today</div></div>
+            <div className="kb-card" style={card}><div style={bigNum}>{totalAnswers}</div><div style={small}>answers in total</div></div>
+          </div>
+
+          <div className="kb-topic-header" style={{ marginTop: 22 }}>Last 14 days</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 70, marginTop: 8 }}>
+            {days.map(function (d) {
+              return (
+                <div key={d.key} title={d.key + ": " + d.count + " answers"} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                  <div style={{ width: "100%", height: d.count ? Math.max(4, Math.round((d.count / maxDay) * 56)) : 2, background: d.count ? "var(--indigo)" : "var(--paper-line)" }} />
+                  <div style={{ fontSize: 9, color: "var(--ink-soft)", marginTop: 2 }}>{d.label}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="kb-topic-header" style={{ marginTop: 22 }}>By area</div>
+          <div style={{ fontSize: 13, marginTop: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: cols, gap: 4, color: "var(--ink-soft)", fontSize: 11, padding: "4px 0" }}>
+              <span>Area</span><span>Seen</span><span>Known</span><span>Due</span><span>Accuracy</span>
+            </div>
+            {Object.keys(areas).sort().map(function (name) {
+              const a = areas[name];
+              const total = a.right + a.wrong;
+              return (
+                <div key={name} className="kb-item-row" style={{ display: "grid", gridTemplateColumns: cols, gap: 4, alignItems: "center" }}>
+                  <span>{name}</span>
+                  <span>{a.seen}</span>
+                  <span>{a.known}</span>
+                  <span style={{ color: a.due ? "var(--shu)" : "inherit" }}>{a.due}</span>
+                  <span>{total ? Math.round((a.right / total) * 100) + "%" : "–"}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p style={{ fontSize: 11, color: "var(--ink-soft)", marginTop: 6 }}>Known = answered right several times in a row, so it now comes back only every couple of weeks or more.</p>
+
+          <div className="kb-topic-header" style={{ marginTop: 22 }}>Trouble spots</div>
+          {trouble.length === 0 ? (
+            <p style={{ marginTop: 8, color: "var(--ink-soft)", fontSize: 14 }}>Nothing you are repeatedly getting wrong right now.</p>
+          ) : (
+            <>
+              {trouble.map(function (t) {
+                const r = progress[t.key];
+                return (
+                  <div key={t.key} className="kb-item-row">
+                    <span style={{ flex: 1 }}>
+                      {t.label}
+                      <span style={{ display: "block", fontSize: 11, color: "var(--ink-soft)" }}>{t.area}</span>
+                    </span>
+                    <span style={{ fontSize: 12, color: "var(--ink-soft)", whiteSpace: "nowrap" }}>{r.right} right · {r.wrong} wrong</span>
+                  </div>
+                );
+              })}
+              <div style={{ marginTop: 14 }}>
+                <button className="kb-btn" onClick={onReviewMistakes} disabled={quizzable === 0}>Quiz me on my mistakes</button>
+                <p style={{ fontSize: 11, color: "var(--ink-soft)", marginTop: 6 }}>Covers words, grammar, kanji meanings and fill-the-blank. Kana and writing mistakes come back in Practice and Write.</p>
+              </div>
+            </>
+          )}
+        </>
       )}
     </div>
   );
